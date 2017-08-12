@@ -1,0 +1,12 @@
+[package]
+authors = ["Michael Bryan <michaelfbryan@gmail.com>"]
+build = "build.rs"
+name = "cargo-metrics"
+version = "0.1.0"
+[build-dependencies]
+skeptic = "0.12.3"
+
+[dependencies]
+
+[dev-dependencies]
+skeptic = "0.12.3"
