@@ -10,3 +10,7 @@ skeptic = "0.12.3"
 
 [dev-dependencies]
 skeptic = "0.12.3"
+
+[[bin]]
+name = "cargo-metrics"
+doc = false
