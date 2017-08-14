@@ -1,0 +1,278 @@
+<!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Instrumenting rustc_driver - An Unofficial Guide to Using Rustc</title>
+        <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+
+        <base href="">
+
+        <link rel="stylesheet" href="book.css">
+        <link href="https://fonts.googleapis.com/css?family=Open+Sans:300italic,400italic,600italic,700italic,800italic,400,300,600,700,800" rel="stylesheet" type="text/css">
+        <link href="https://fonts.googleapis.com/css?family=Source+Code+Pro:500" rel="stylesheet" type="text/css">
+
+        <link rel="shortcut icon" href="favicon.png">
+
+        <!-- Font Awesome -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.3.0/css/font-awesome.min.css">
+
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+
+        <!-- MathJax -->
+        <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+
+        <!-- Fetch JQuery from CDN but have a local fallback -->
+        <script src="https://code.jquery.com/jquery-2.1.4.min.js"></script>
+        <script>
+            if (typeof jQuery == 'undefined') {
+                document.write(unescape("%3Cscript src='jquery.js'%3E%3C/script%3E"));
+            }
+        </script>
+    </head>
+    <body class="light">
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script type="text/javascript">
+            var theme = localStorage.getItem('theme');
+            if (theme == null) { theme = 'light'; }
+            $('body').removeClass().addClass(theme);
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script type="text/javascript">
+            var sidebar = localStorage.getItem('sidebar');
+            if (sidebar === "hidden") { $("html").addClass("sidebar-hidden") }
+            else if (sidebar === "visible") { $("html").addClass("sidebar-visible") }
+        </script>
+
+        <div id="sidebar" class="sidebar">
+            <ul class="chapter"><li><a href="./introduction.html"><strong>1.</strong> Introduction</a></li><li><a href="./compilation_process.html"><strong>2.</strong> The Compilation Process</a></li><li><a href="./rustc_driver.html" class="active"><strong>3.</strong> Instrumenting rustc_driver</a></li><li><a href="./unsafe_count.html"><strong>4.</strong> Counting Lines of Unsafe</a></li></ul>
+        </div>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar" class="menu-bar">
+                    <div class="left-buttons">
+                        <i id="sidebar-toggle" class="fa fa-bars"></i>
+                        <i id="theme-toggle" class="fa fa-paint-brush"></i>
+                    </div>
+
+                    <h1 class="menu-title">An Unofficial Guide to Using Rustc</h1>
+
+                    <div class="right-buttons">
+                        <i id="print-button" class="fa fa-print" title="Print this book"></i>
+                    </div>
+                </div>
+
+                <div id="content" class="content">
+                    <a class="header" href="./rustc_driver.html#instrumenting-rustc_driver" id="instrumenting-rustc_driver"><h1>Instrumenting <code>rustc_driver</code></h1></a>
+<p>There are a couple ways to influence the compilation process, but by far the
+most useful is with a <code>CompileController</code>. This is a fairly basic struct
+containing a bunch of <code>PhaseController</code>s which get invoked at particular
+points in the compilation process.</p>
+<p>A <code>PhaseController</code> just contains a callback which is invoked with the
+current <code>CompileState</code>, and a <code>stop</code> attribute which says whether to abort
+compilation.</p>
+<p>From the <code>rust-lang/rust</code> repo's root directory they are defined in
+<code>src/librustc_driver/driver.rs</code>.</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# extern crate rustc_driver;
+# extern crate rustc_resolve;
+# use rustc_driver::Compilation;
+# use rustc_driver::driver::CompileState;
+# use rustc_resolve::MakeGlobMap;
+pub struct CompileController&lt;'a&gt; {
+    pub after_parse: PhaseController&lt;'a&gt;,
+    pub after_expand: PhaseController&lt;'a&gt;,
+    pub after_hir_lowering: PhaseController&lt;'a&gt;,
+    pub after_analysis: PhaseController&lt;'a&gt;,
+    pub after_llvm: PhaseController&lt;'a&gt;,
+    pub compilation_done: PhaseController&lt;'a&gt;,
+
+    pub make_glob_map: MakeGlobMap,
+    // Whether the compiler should keep the ast beyond parsing.
+    pub keep_ast: bool,
+    // -Zcontinue-parse-after-error
+    pub continue_parse_after_error: bool,
+}
+
+pub struct PhaseController&lt;'a&gt; {
+    pub stop: Compilation,
+    // If true then the compiler will try to run the callback even if the phase
+    // ends with an error. Note that this is not always possible.
+    pub run_callback_on_error: bool,
+    pub callback: Box&lt;Fn(&amp;mut CompileState) + 'a&gt;,
+}
+# fn main(){}
+</code></pre></pre>
+<p>The <code>CompileState</code> is a dumb object which just wraps the various bits of state
+required for the compilation process up into a single struct. All of these bits
+and pieces are declared <code>pub</code> so they can be accessed directly by your
+<code>PhaseController</code>. Its full definition is in <code>src/librustc_driver/driver.rs</code>,
+however it should look something like this (valid as of <em>2017-08-14</em>).</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# extern crate arena;
+# extern crate rustc;
+# extern crate rustc_driver;
+# extern crate rustc_plugin;
+# extern crate rustc_metadata;
+# extern crate syntax;
+use arena::DroplessArena;
+use syntax::ast;
+use rustc::hir::{self, map as hir_map};
+use rustc::ty::{self, GlobalArenas, Resolutions, TyCtxt};
+use rustc::session::Session;
+use rustc::session::config::{Input, OutputFilenames};
+use rustc_metadata::cstore::CStore;
+use rustc_plugin::registry::Registry;
+use std::path::Path;
+
+pub struct CompileState&lt;'a, 'tcx: 'a&gt; {
+    pub input: &amp;'a Input,
+    pub session: &amp;'tcx Session,
+    pub krate: Option&lt;ast::Crate&gt;,
+    pub registry: Option&lt;Registry&lt;'a&gt;&gt;,
+    pub cstore: Option&lt;&amp;'a CStore&gt;,
+    pub crate_name: Option&lt;&amp;'a str&gt;,
+    pub output_filenames: Option&lt;&amp;'a OutputFilenames&gt;,
+    pub out_dir: Option&lt;&amp;'a Path&gt;,
+    pub out_file: Option&lt;&amp;'a Path&gt;,
+    pub arena: Option&lt;&amp;'tcx DroplessArena&gt;,
+    pub arenas: Option&lt;&amp;'tcx GlobalArenas&lt;'tcx&gt;&gt;,
+    pub expanded_crate: Option&lt;&amp;'a ast::Crate&gt;,
+    pub hir_crate: Option&lt;&amp;'a hir::Crate&gt;,
+    pub hir_map: Option&lt;&amp;'a hir_map::Map&lt;'tcx&gt;&gt;,
+    pub resolutions: Option&lt;&amp;'a Resolutions&gt;,
+    pub analysis: Option&lt;&amp;'a ty::CrateAnalysis&gt;,
+    pub tcx: Option&lt;TyCtxt&lt;'a, 'tcx, 'tcx&gt;&gt;,
+    #[cfg(feature=&quot;llvm&quot;)]
+    pub trans: Option&lt;&amp;'a trans::CrateTranslation&gt;,
+}
+# fn main(){}
+</code></pre></pre>
+<a class="header" href="./rustc_driver.html#making-rustc_driver-run-our-compilecontroller" id="making-rustc_driver-run-our-compilecontroller"><h2>Making <code>rustc_driver</code> Run our <code>CompileController</code></h2></a>
+<p>As <code>@nrc</code> mentions in <a href="https://github.com/nrc/stupid-stats#the-driver-customisation-apis">stupid-stats</a>:</p>
+<blockquote>
+<p>There are two primary ways to customise compilation - high level control of
+the driver using <code>CompilerCalls</code> and controlling each phase of compilation
+using a <code>CompileController</code>. The former lets you customise handling of command
+line arguments etc., the latter lets you stop compilation early or execute
+code between phases.</p>
+</blockquote>
+<p>We are mainly interested in the <code>CompileController</code> because that's where all
+the action is, but to let us inject one into <code>rustc_driver</code> we'll need to
+define our own type which implements <code>CompilerCalls</code>. Most of the methods for
+<code>CompilerCalls</code> have sane defaults, so we can get away with only implementing
+<code>build_controller()</code>.</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# #![allow(dead_code)]
+# extern crate rustc_driver;
+# extern crate getopts;
+# extern crate rustc;
+# use rustc_driver::CompilerCalls;
+# use rustc_driver::driver::CompileController;
+# use rustc::session::Session;
+struct Calls;
+
+impl&lt;'a&gt; CompilerCalls&lt;'a&gt; for Calls {
+    fn build_controller(&amp;mut self, 
+                        _: &amp;Session, 
+                        _: &amp;getopts::Matches) -&gt; CompileController&lt;'a&gt; {
+        panic!(&quot;TODO: construct a CompileController&quot;)
+    }
+}
+# fn main() {}
+</code></pre></pre>
+<p>We'll flesh out the <code>build_controller()</code> method later on when we start going
+into concrete examples, but for now lets just try to get something to run.</p>
+<p>The main entrypoint for <code>rustc_driver</code> is the <code>run_compiler()</code> function. This
+takes a list of command line arguments, a mutable reference to your
+<code>CompilerCalls</code> implementation, and a couple other optional fields. Note the
+mutable reference bit, the <code>CompilerCalls</code>'s <code>'a</code> lifetime allows our various
+phases to manipulate the <code>Calls</code> which was passed in so we can pass information
+from <code>rustc</code> to the caller.</p>
+<pre><pre class="playpen"><code class="language-rust no_run"># #![feature(rustc_private)]
+# extern crate rustc_driver;
+# use rustc_driver::RustcDefaultCalls as Calls;
+use std::env;
+
+fn main() {
+    let mut calls = Calls;
+    let args: Vec&lt;String&gt; = env::args().collect();
+    let (compile_result, _session) = rustc_driver::run_compiler(&amp;args, 
+                                                                &amp;mut calls, 
+                                                                None, 
+                                                                None);
+    if let Err(e) = compile_result {
+        panic!(&quot;Compilation failed! {:?}&quot;, e);
+    }
+}
+</code></pre></pre>
+<p>If we create a new project with <code>cargo</code> and put the above code in its <code>main.rs</code>
+you should see something like this when it's run:</p>
+<pre><code class="language-bash">$ cargo run -- src/lib.rs 
+    ...
+thread 'main' panicked at 'TODO: construct a CompileController', src/lib.rs:18:8
+note: Run with `RUST_BACKTRACE=1` for a backtrace.
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> If you just do <code>cargo run</code>, it'll print the usual <code>rustc</code> help
+text. This is because of the default impl for <code>CompilerCalls::no_input()</code>.
+Check out the source code for more.</p>
+</blockquote>
+<p>Now we know we can inject code into <code>rustc_driver</code> we can move onto the the
+first example, an analysis pass which counts the number of unsafe lines of
+code in a crate.</p>
+
+                </div>
+
+                <!-- Mobile navigation buttons -->
+                
+                    <a href="./compilation_process.html" class="mobile-nav-chapters previous">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+                
+
+                
+                    <a href="./unsafe_count.html" class="mobile-nav-chapters next">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+                
+
+            </div>
+
+            
+                <a href="./compilation_process.html" class="nav-chapters previous" title="You can navigate through the chapters using the arrow keys">
+                    <i class="fa fa-angle-left"></i>
+                </a>
+            
+
+            
+                <a href="./unsafe_count.html" class="nav-chapters next" title="You can navigate through the chapters using the arrow keys">
+                    <i class="fa fa-angle-right"></i>
+                </a>
+            
+
+        </div>
+
+
+        <!-- Local fallback for Font Awesome -->
+        <script>
+            if ($(".fa").css("font-family") !== "FontAwesome") {
+                $('<link rel="stylesheet" type="text/css" href="_FontAwesome/css/font-awesome.css">').prependTo('head');
+            }
+        </script>
+
+        <!-- Livereload script (if served using the cli tool) -->
+        
+
+        
+
+
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+    </body>
+</html>

@@ -1,0 +1,510 @@
+<!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Counting Lines of Unsafe - An Unofficial Guide to Using Rustc</title>
+        <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+
+        <base href="">
+
+        <link rel="stylesheet" href="book.css">
+        <link href="https://fonts.googleapis.com/css?family=Open+Sans:300italic,400italic,600italic,700italic,800italic,400,300,600,700,800" rel="stylesheet" type="text/css">
+        <link href="https://fonts.googleapis.com/css?family=Source+Code+Pro:500" rel="stylesheet" type="text/css">
+
+        <link rel="shortcut icon" href="favicon.png">
+
+        <!-- Font Awesome -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.3.0/css/font-awesome.min.css">
+
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+
+        <!-- MathJax -->
+        <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+
+        <!-- Fetch JQuery from CDN but have a local fallback -->
+        <script src="https://code.jquery.com/jquery-2.1.4.min.js"></script>
+        <script>
+            if (typeof jQuery == 'undefined') {
+                document.write(unescape("%3Cscript src='jquery.js'%3E%3C/script%3E"));
+            }
+        </script>
+    </head>
+    <body class="light">
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script type="text/javascript">
+            var theme = localStorage.getItem('theme');
+            if (theme == null) { theme = 'light'; }
+            $('body').removeClass().addClass(theme);
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script type="text/javascript">
+            var sidebar = localStorage.getItem('sidebar');
+            if (sidebar === "hidden") { $("html").addClass("sidebar-hidden") }
+            else if (sidebar === "visible") { $("html").addClass("sidebar-visible") }
+        </script>
+
+        <div id="sidebar" class="sidebar">
+            <ul class="chapter"><li><a href="./introduction.html"><strong>1.</strong> Introduction</a></li><li><a href="./compilation_process.html"><strong>2.</strong> The Compilation Process</a></li><li><a href="./rustc_driver.html"><strong>3.</strong> Instrumenting rustc_driver</a></li><li><a href="./unsafe_count.html"><strong>4.</strong> Counting Lines of Unsafe</a></li></ul>
+        </div>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar" class="menu-bar">
+                    <div class="left-buttons">
+                        <i id="sidebar-toggle" class="fa fa-bars"></i>
+                        <i id="theme-toggle" class="fa fa-paint-brush"></i>
+                    </div>
+
+                    <h1 class="menu-title">An Unofficial Guide to Using Rustc</h1>
+
+                    <div class="right-buttons">
+                        <i id="print-button" class="fa fa-print" title="Print this book"></i>
+                    </div>
+                </div>
+
+                <div id="content" class="content">
+                    <a class="header" href="print.html#an-unofficial-guide-to-using-rustc" id="an-unofficial-guide-to-using-rustc"><h1>An Unofficial Guide to Using Rustc</h1></a>
+<p>Many people familiar with C and C++ will have heard of <a href="https://clang.llvm.org/docs/Tooling.html">libclang</a>. This is a
+really powerful library which gives you access to the internals of the <code>clang</code>
+compiler so you can analyse a C/C++ program, or even rewrite bits of it on the
+fly. This allows you to write tools for detecting undefined behaviour or
+insert additional statements to help calculate code coverage.</p>
+<p>The Rust compiler gives you hooks for analysing or manipulating a program
+during the compilation process. This is arguably more powerful because you
+have access to <em>all</em> of the compiler internals... With the trade-off being
+you can only access it from <em>nightly</em> given the perpetually unstable nature of
+these internals (<code>rustc</code> and the Rust language are continually evolving after
+all).</p>
+<p>This tutorial should hopefully give you a better understanding of the
+compilation process and how you can plug into <code>rustc</code> to do magical and
+wonderous things. It's written from the point-of-view of someone wanting to
+write a generic Rust crate analyser as a <code>cargo</code> subcommand (<code>cargo metrics</code>).</p>
+<a class="header" href="print.html#useful-links-and-prior-art" id="useful-links-and-prior-art"><h2>Useful Links and Prior Art</h2></a>
+<p>Often the easiest way to get started is to look at existing uses of <code>rustc</code>
+internals in the wild and adapt what they've done to your use case.</p>
+<p>Here are several repositories which already use <code>rustc</code> for analysing Rust
+code.</p>
+<ul>
+<li><a href="https://github.com/nrc/stupid-stats">Stupid Stats (highly recommended - I actually based this tutorial on <code>nrc</code>'s work)</a></li>
+<li><a href="https://github.com/rust-lang-nursery/rust-clippy">Clippy</a></li>
+<li><a href="https://github.com/ibabushkin/rust-semverver">rust-semverver</a></li>
+<li><a href="https://github.com/solson/miri">miri</a></li>
+<li><a href="https://gitlab.com/integer32llc/cargo-doc-coverage">cargo-doc-coverage</a></li>
+</ul>
+<a class="header" href="print.html#initial-setup" id="initial-setup"><h2>Initial Setup</h2></a>
+<p>You don't need anything special to start using <code>rustc</code>'s internals, just
+switch to <code>nightly</code> and you should be able to follow along.</p>
+<pre><code class="language-bash">$ rustup default nightly
+</code></pre>
+<p>While it's not required, it's quite useful to have a copy of the <code>rustdoc</code>
+docs for <code>rustc</code> (and its various other crates) handy, as well as a local
+checkout of the <a href="https://github.com/rust-lang/rust">rust-lang/rust</a> repo. I've set up a cron job on my laptop to
+periodically regenerate the internal compiler documentation and push them to
+<a href="https://michael-f-bryan.github.io/rustc-internal-docs/rustc/index.html">GitHub Pages</a> to make your life easier.</p>
+<a class="header" href="print.html#the-compilation-process" id="the-compilation-process"><h1>The Compilation Process</h1></a>
+<p>While the compilation process itself is quite complex and involves many moving
+parts, it can be broken down into a handful of discrete phases. These are:</p>
+<ul>
+<li>Lexing and Parsing</li>
+<li>Lowering to HIR</li>
+<li>Analysis (type checking, inference, <code>borrowck</code>, etc)</li>
+<li>Translation to LLVM IR</li>
+<li>Optimisation and code generation (done by LLVM)</li>
+<li>Linking into a single executable (also outsourced, usually to something like <code>ld</code>)</li>
+</ul>
+<p>All of these steps are coordinated by the <code>driver</code> which resides in
+<a href="https://github.com/rust-lang/rust/tree/master/src/librustc_driver"><code>rustc_driver</code></a>. A lot of this tutorial will be interacting with
+<code>rustc_driver</code> and the various knobs and hooks it gives us access to.</p>
+<blockquote>
+<p><strong>TODO:</strong> Write a bit about each step and where they are located in the
+<code>rust-lang/rust</code> repo.</p>
+</blockquote>
+<a class="header" href="print.html#instrumenting-rustc_driver" id="instrumenting-rustc_driver"><h1>Instrumenting <code>rustc_driver</code></h1></a>
+<p>There are a couple ways to influence the compilation process, but by far the
+most useful is with a <code>CompileController</code>. This is a fairly basic struct
+containing a bunch of <code>PhaseController</code>s which get invoked at particular
+points in the compilation process.</p>
+<p>A <code>PhaseController</code> just contains a callback which is invoked with the
+current <code>CompileState</code>, and a <code>stop</code> attribute which says whether to abort
+compilation.</p>
+<p>From the <code>rust-lang/rust</code> repo's root directory they are defined in
+<code>src/librustc_driver/driver.rs</code>.</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# extern crate rustc_driver;
+# extern crate rustc_resolve;
+# use rustc_driver::Compilation;
+# use rustc_driver::driver::CompileState;
+# use rustc_resolve::MakeGlobMap;
+pub struct CompileController&lt;'a&gt; {
+    pub after_parse: PhaseController&lt;'a&gt;,
+    pub after_expand: PhaseController&lt;'a&gt;,
+    pub after_hir_lowering: PhaseController&lt;'a&gt;,
+    pub after_analysis: PhaseController&lt;'a&gt;,
+    pub after_llvm: PhaseController&lt;'a&gt;,
+    pub compilation_done: PhaseController&lt;'a&gt;,
+
+    pub make_glob_map: MakeGlobMap,
+    // Whether the compiler should keep the ast beyond parsing.
+    pub keep_ast: bool,
+    // -Zcontinue-parse-after-error
+    pub continue_parse_after_error: bool,
+}
+
+pub struct PhaseController&lt;'a&gt; {
+    pub stop: Compilation,
+    // If true then the compiler will try to run the callback even if the phase
+    // ends with an error. Note that this is not always possible.
+    pub run_callback_on_error: bool,
+    pub callback: Box&lt;Fn(&amp;mut CompileState) + 'a&gt;,
+}
+# fn main(){}
+</code></pre></pre>
+<p>The <code>CompileState</code> is a dumb object which just wraps the various bits of state
+required for the compilation process up into a single struct. All of these bits
+and pieces are declared <code>pub</code> so they can be accessed directly by your
+<code>PhaseController</code>. Its full definition is in <code>src/librustc_driver/driver.rs</code>,
+however it should look something like this (valid as of <em>2017-08-14</em>).</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# extern crate arena;
+# extern crate rustc;
+# extern crate rustc_driver;
+# extern crate rustc_plugin;
+# extern crate rustc_metadata;
+# extern crate syntax;
+use arena::DroplessArena;
+use syntax::ast;
+use rustc::hir::{self, map as hir_map};
+use rustc::ty::{self, GlobalArenas, Resolutions, TyCtxt};
+use rustc::session::Session;
+use rustc::session::config::{Input, OutputFilenames};
+use rustc_metadata::cstore::CStore;
+use rustc_plugin::registry::Registry;
+use std::path::Path;
+
+pub struct CompileState&lt;'a, 'tcx: 'a&gt; {
+    pub input: &amp;'a Input,
+    pub session: &amp;'tcx Session,
+    pub krate: Option&lt;ast::Crate&gt;,
+    pub registry: Option&lt;Registry&lt;'a&gt;&gt;,
+    pub cstore: Option&lt;&amp;'a CStore&gt;,
+    pub crate_name: Option&lt;&amp;'a str&gt;,
+    pub output_filenames: Option&lt;&amp;'a OutputFilenames&gt;,
+    pub out_dir: Option&lt;&amp;'a Path&gt;,
+    pub out_file: Option&lt;&amp;'a Path&gt;,
+    pub arena: Option&lt;&amp;'tcx DroplessArena&gt;,
+    pub arenas: Option&lt;&amp;'tcx GlobalArenas&lt;'tcx&gt;&gt;,
+    pub expanded_crate: Option&lt;&amp;'a ast::Crate&gt;,
+    pub hir_crate: Option&lt;&amp;'a hir::Crate&gt;,
+    pub hir_map: Option&lt;&amp;'a hir_map::Map&lt;'tcx&gt;&gt;,
+    pub resolutions: Option&lt;&amp;'a Resolutions&gt;,
+    pub analysis: Option&lt;&amp;'a ty::CrateAnalysis&gt;,
+    pub tcx: Option&lt;TyCtxt&lt;'a, 'tcx, 'tcx&gt;&gt;,
+    #[cfg(feature=&quot;llvm&quot;)]
+    pub trans: Option&lt;&amp;'a trans::CrateTranslation&gt;,
+}
+# fn main(){}
+</code></pre></pre>
+<a class="header" href="print.html#making-rustc_driver-run-our-compilecontroller" id="making-rustc_driver-run-our-compilecontroller"><h2>Making <code>rustc_driver</code> Run our <code>CompileController</code></h2></a>
+<p>As <code>@nrc</code> mentions in <a href="https://github.com/nrc/stupid-stats#the-driver-customisation-apis">stupid-stats</a>:</p>
+<blockquote>
+<p>There are two primary ways to customise compilation - high level control of
+the driver using <code>CompilerCalls</code> and controlling each phase of compilation
+using a <code>CompileController</code>. The former lets you customise handling of command
+line arguments etc., the latter lets you stop compilation early or execute
+code between phases.</p>
+</blockquote>
+<p>We are mainly interested in the <code>CompileController</code> because that's where all
+the action is, but to let us inject one into <code>rustc_driver</code> we'll need to
+define our own type which implements <code>CompilerCalls</code>. Most of the methods for
+<code>CompilerCalls</code> have sane defaults, so we can get away with only implementing
+<code>build_controller()</code>.</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# #![allow(dead_code)]
+# extern crate rustc_driver;
+# extern crate getopts;
+# extern crate rustc;
+# use rustc_driver::CompilerCalls;
+# use rustc_driver::driver::CompileController;
+# use rustc::session::Session;
+struct Calls;
+
+impl&lt;'a&gt; CompilerCalls&lt;'a&gt; for Calls {
+    fn build_controller(&amp;mut self, 
+                        _: &amp;Session, 
+                        _: &amp;getopts::Matches) -&gt; CompileController&lt;'a&gt; {
+        panic!(&quot;TODO: construct a CompileController&quot;)
+    }
+}
+# fn main() {}
+</code></pre></pre>
+<p>We'll flesh out the <code>build_controller()</code> method later on when we start going
+into concrete examples, but for now lets just try to get something to run.</p>
+<p>The main entrypoint for <code>rustc_driver</code> is the <code>run_compiler()</code> function. This
+takes a list of command line arguments, a mutable reference to your
+<code>CompilerCalls</code> implementation, and a couple other optional fields. Note the
+mutable reference bit, the <code>CompilerCalls</code>'s <code>'a</code> lifetime allows our various
+phases to manipulate the <code>Calls</code> which was passed in so we can pass information
+from <code>rustc</code> to the caller.</p>
+<pre><pre class="playpen"><code class="language-rust no_run"># #![feature(rustc_private)]
+# extern crate rustc_driver;
+# use rustc_driver::RustcDefaultCalls as Calls;
+use std::env;
+
+fn main() {
+    let mut calls = Calls;
+    let args: Vec&lt;String&gt; = env::args().collect();
+    let (compile_result, _session) = rustc_driver::run_compiler(&amp;args, 
+                                                                &amp;mut calls, 
+                                                                None, 
+                                                                None);
+    if let Err(e) = compile_result {
+        panic!(&quot;Compilation failed! {:?}&quot;, e);
+    }
+}
+</code></pre></pre>
+<p>If we create a new project with <code>cargo</code> and put the above code in its <code>main.rs</code>
+you should see something like this when it's run:</p>
+<pre><code class="language-bash">$ cargo run -- src/lib.rs 
+    ...
+thread 'main' panicked at 'TODO: construct a CompileController', src/lib.rs:18:8
+note: Run with `RUST_BACKTRACE=1` for a backtrace.
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> If you just do <code>cargo run</code>, it'll print the usual <code>rustc</code> help
+text. This is because of the default impl for <code>CompilerCalls::no_input()</code>.
+Check out the source code for more.</p>
+</blockquote>
+<p>Now we know we can inject code into <code>rustc_driver</code> we can move onto the the
+first example, an analysis pass which counts the number of unsafe lines of
+code in a crate.</p>
+<a class="header" href="print.html#counting-lines-of-unsafe" id="counting-lines-of-unsafe"><h1>Counting Lines of Unsafe</h1></a>
+<p>The first metric we're going to calculate is the number of lines of unsafe
+in a crate. For this we don't need to run any of the later steps like type
+checking or <code>borrowck</code>, so we'll just use the AST generated after the compiler
+finishes parsing. We can use the <a href="https://github.com/rust-lang/rust/blob/e3245948445b77c25cd9f3b29cbad3187aee3eb7/src/librustc_driver/driver.rs#L324"><code>CompileController.after_parse</code></a> to
+hook in after the compiler has finished parsing and expanding macros.</p>
+<p>For the actual AST inspection, the <code>syntax</code> crate provides an extremely handy
+<a href="https://michael-f-bryan.github.io/rustc-internal-docs/syntax/visit/trait.Visitor.html">Visitor</a> trait which will recursively visit each node in a <a href="https://michael-f-bryan.github.io/rustc-internal-docs/syntax/ast/struct.Crate.html">Crate</a>. So
+that means creating an unsafe code counter will require:</p>
+<ul>
+<li>Creating a type which implements the <a href="https://michael-f-bryan.github.io/rustc-internal-docs/syntax/visit/trait.Visitor.html">Visitor</a> trait, overriding just the
+methods which inspect <code>Block</code>s and <code>Item</code>s</li>
+<li>In the <code>Visitor</code> impl store the <a href="https://michael-f-bryan.github.io/rustc-internal-docs/syntax/ext/quote/rt/struct.Span.html">Span</a> for all <code>unsafe</code> blocks we find</li>
+<li>Set the <code>controller.after_parse.callback</code> to be a closure which invokes our
+custom <code>Visitor</code>, making sure the result gets saved back in our <code>Calls</code>
+struct</li>
+<li>In the top level <code>main()</code> function, print out the results of our <code>unsafe</code>
+analysis</li>
+</ul>
+<p>First, we'll create the custom <code>Visitor</code>.</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# extern crate syntax;
+use syntax::ast::{Block, BlockCheckMode, Item, ItemKind, Unsafety};
+use syntax::visit::{self, Visitor};
+use syntax::ext::quote::rt::Span;
+
+pub struct UnsafeVisitor {
+    unsafe_lines: Vec&lt;Span&gt;,
+}
+
+impl&lt;'a&gt; Visitor&lt;'a&gt; for UnsafeVisitor {
+    fn visit_item(&amp;mut self, item: &amp;'a Item) {
+        match item.node {
+            ItemKind::Fn(_, Unsafety::Unsafe, ..) |
+            ItemKind::Trait(Unsafety::Unsafe, ..) | 
+            ItemKind::DefaultImpl(Unsafety::Unsafe, ..) | 
+            ItemKind::Impl(Unsafety::Unsafe, ..) =&gt; {
+                self.unsafe_lines.push(item.span.clone());
+            }
+            _ =&gt; {},
+        }
+
+        visit::walk_item(self, item);
+    }
+
+    fn visit_block(&amp;mut self, block: &amp;'a Block) {
+        if let BlockCheckMode::Unsafe(_) = block.rules {
+            self.unsafe_lines.push(block.span.clone());
+        }
+
+        visit::walk_block(self, block);
+    }
+}
+# fn main() {}
+</code></pre></pre>
+<p>It took a while to skim through all the docs for <a href="https://michael-f-bryan.github.io/rustc-internal-docs/syntax/ast/struct.Item.html">Item</a> and <a href="https://michael-f-bryan.github.io/rustc-internal-docs/syntax/ast/struct.Block.html">Block</a> to
+figure out how you can tell when something is <code>unsafe</code>, but that's more tedious
+than difficult. For now we're going to assume you'll never get an unsafe block
+inside a function which is also defined as unsafe.</p>
+<p>Next, let's define a couple data structures to store our metrics in. They're
+pretty boring as-is, just a couple <em>Plain Ol' Data</em> structs.</p>
+<pre><pre class="playpen"><code class="language-rust">#[derive(Debug, Clone, Default)]
+pub struct Metrics {
+    pub spans: Vec&lt;Row&gt;,
+    pub total_lines: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Row {
+    pub start: Location,
+    pub end: Location,
+    pub num_lines: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Location {
+    pub filename: String,
+    pub line: usize,
+    pub col: usize,
+}
+# fn main() {}
+</code></pre></pre>
+<p>To make things easier, I've pulled the calling of <code>UnsafeVisitor</code> and resolving
+all <code>Spans</code> into line numbers and file locations into a helper function called
+<code>analyse_ast</code> which takes the AST and a <code>CodeMap</code> and transforms it into a
+<code>Metrics</code>.</p>
+<p>The easiest way to return information from the internals of <code>rustc</code> to our top
+level is by updating the internal state of our <code>Calls</code> to hold the data to be
+returned. Because the trait definition for <code>CompilerCalls</code> doesn't ensure our
+<code>Calls</code> will outlive the running of <code>rustc_driver</code>, we need to use a
+<code>Rc&lt;RefCell&lt;T&gt;&gt;</code> to satisfy the borrow checker at runtime instead. To do things
+properly, <code>Calls</code> will contain a <code>Rc&lt;RefCell&lt;Option&lt;Metrics&gt;&gt;&gt;</code>. The type
+definition looks quite intimidating, but basically it signifies that we'll only
+have metrics after the compiler has run, and we wrap it in a <code>Rc&lt;RefCell&lt;T&gt;&gt;</code>
+so it can be mutated by multiple entities (in this case, both <code>rustc</code> and us).</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# #![feature(box_syntax)]
+# extern crate rustc;
+# extern crate rustc_driver;
+# extern crate getopts;
+# extern crate syntax;
+# use syntax::ast::Crate;
+# use syntax::codemap::CodeMap;
+# use rustc::session::Session;
+# use rustc_driver::driver::{CompileController, CompileState};
+# use rustc_driver::{CompilerCalls, Compilation};
+# use std::rc::Rc;
+# use std::cell::RefCell;
+# #[derive(Debug, Clone, Default)]
+# pub struct Metrics;
+# fn analyse_ast(_ast: &amp;Crate, _codemap: &amp;CodeMap) -&gt; Metrics {unimplemented!()}
+#[derive(Default, Debug, Clone)]
+pub struct Calls {
+    pub unsafe_metrics: Rc&lt;RefCell&lt;Option&lt;Metrics&gt;&gt;&gt;,
+}
+
+impl&lt;'a&gt; CompilerCalls&lt;'a&gt; for Calls {
+    fn build_controller(&amp;mut self, 
+                        _: &amp;Session, 
+                        _: &amp;getopts::Matches) -&gt; CompileController&lt;'a&gt; {
+        let mut controller = CompileController::basic();
+        controller.after_parse.stop = Compilation::Stop;
+
+        let metrics = self.unsafe_metrics.clone();
+
+        controller.after_parse.callback = box move |compile_state: &amp;mut CompileState| {
+            let ast = compile_state.krate.as_ref().unwrap();
+
+            *metrics.borrow_mut() = Some(analyse_ast(
+                ast,
+                compile_state.session.codemap(),
+            ));
+        };
+
+        controller
+    }
+}
+# fn main() {}
+</code></pre></pre>
+<p>You can see that after the AST has been analysed we set <code>metrics</code> (a pointer
+to the <code>unsafe_metrics</code> property inside <code>Calls</code>) to be the result of the
+analysis.</p>
+<p>The helper function itself, <code>analyse_ast()</code>, then just creates a visitor,
+makes it visit the provided AST, then turns the result into a <code>Metrics</code> for
+our analyser.</p>
+<pre><pre class="playpen"><code class="language-rust"># #![feature(rustc_private)]
+# #![allow(dead_code)]
+# extern crate syntax;
+# extern crate syntax_pos;
+# use syntax::codemap::CodeMap;
+# use syntax::ast::Crate;
+# use syntax::ext::quote::rt::Span;
+# use syntax_pos::Loc;
+# use syntax::visit::{self, Visitor};
+fn analyse_ast(ast: &amp;Crate, codemap: &amp;CodeMap) -&gt; Metrics {
+    let mut visitor = UnsafeVisitor::new();
+
+    // analyse the crate
+    visit::walk_crate(&amp;mut visitor, ast);
+
+    // then resolve spans to line numbers and locations
+    let spans = visitor
+        .unsafe_lines
+        .iter()
+        .map(|span| {
+            let start = Location::from(codemap.lookup_char_pos(span.lo));
+            let end = Location::from(codemap.lookup_char_pos(span.hi));
+            let diff = end.line - start.line;
+
+            Row {
+                start: start,
+                end: end,
+                num_lines: if diff == 0 { 1 } else { diff },
+            }
+        })
+        .collect();
+
+    Metrics {
+        spans: spans,
+        total_lines: codemap.count_lines(),
+    }
+}
+# fn main() {}
+# #[derive(Default, Debug)]
+# struct UnsafeVisitor { unsafe_lines: Vec&lt;Span&gt; }
+# impl&lt;'a&gt; Visitor&lt;'a&gt; for UnsafeVisitor {}
+# impl UnsafeVisitor { fn new() -&gt; UnsafeVisitor { UnsafeVisitor::default() }}
+# struct Metrics { spans: Vec&lt;Row&gt;, total_lines: usize }
+# struct Row { start: Location, end: Location, num_lines: usize }
+# struct Location { line: usize }
+# impl From&lt;Loc&gt; for Location { fn from(_other: Loc) -&gt; Self { unimplemented!() } }
+</code></pre></pre>
+
+                </div>
+
+                <!-- Mobile navigation buttons -->
+                
+
+                
+
+            </div>
+
+            
+
+            
+
+        </div>
+
+
+        <!-- Local fallback for Font Awesome -->
+        <script>
+            if ($(".fa").css("font-family") !== "FontAwesome") {
+                $('<link rel="stylesheet" type="text/css" href="_FontAwesome/css/font-awesome.css">').prependTo('head');
+            }
+        </script>
+
+        <!-- Livereload script (if served using the cli tool) -->
+        
+
+        
+
+
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+    </body>
+</html>
