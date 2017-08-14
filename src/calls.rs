@@ -1,12 +1,11 @@
 use getopts;
-use syntax::visit;
 use rustc::session::Session;
 use rustc_driver::driver::{CompileController, CompileState};
 use rustc_driver::{CompilerCalls, Compilation};
 use std::rc::Rc;
 use std::cell::RefCell;
 
-use unsafe_visitor::{Location, Metrics, UnsafeVisitor};
+use unsafe_visitor::{self, Metrics};
 use std::marker::PhantomData;
 
 
@@ -26,26 +25,11 @@ impl<'a> CompilerCalls<'a> for Calls<'a> {
 
         controller.after_parse.callback = box move |compile_state: &mut CompileState| {
             let ast = compile_state.krate.as_ref().unwrap();
-            let mut visitor = UnsafeVisitor::new();
 
-            // analyse the crate
-            visit::walk_crate(&mut visitor, ast);
-
-            // then resolve spans to line numbers and locations
-            let codemap = compile_state.session.codemap();
-            let spans = visitor
-                .unsafe_lines
-                .iter()
-                .map(|span| {
-                    let start = Location::from(codemap.lookup_char_pos(span.lo));
-                    let end = Location::from(codemap.lookup_char_pos(span.hi));
-                    let diff = end.line - start.line;
-
-                    (start, end, if diff == 0 { 1 } else { diff })
-                })
-                .collect();
-
-            *metrics.borrow_mut() = Some(Metrics { spans: spans });
+            *metrics.borrow_mut() = Some(unsafe_visitor::analyse_ast(
+                ast,
+                compile_state.session.codemap(),
+            ));
         };
 
         controller

@@ -18,7 +18,8 @@ pub fn run(args: &[String]) {
     let (compile_result, _session) = rustc_driver::run_compiler(args, &mut calls, None, None);
     compile_result.unwrap();
 
-    let unsafe_metrics = calls.unsafe_metrics.borrow_mut().take().unwrap();
-    let total_unsafe: usize = unsafe_metrics.spans.iter().map(|row| row.2).sum();
-    println!("Unsafe lines: {}", total_unsafe);
+    let metrics = calls.unsafe_metrics.borrow_mut().take().unwrap();
+    let total_unsafe: usize = metrics.spans.iter().map(|row| row.num_lines).sum();
+    let percentage = 100.0 * total_unsafe as f32 / metrics.total_lines as f32;
+    println!("Unsafe lines: {}/{} ({:.2}%)", total_unsafe, metrics.total_lines, percentage);
 }
