@@ -1,0 +1,17 @@
+language: rust
+rust:
+- nightly
+install:
+- ci/install.sh
+cache:
+- cargo
+- pip
+before_cache:
+- chmod -R a+r $HOME/.cargo
+script:
+- cargo build
+- cargo test
+after_success: "./ci/deploy.sh"
+env:
+  global:
+    secure: LMOypmTnRaQOJfYuz0WwYss7yP1LhbNANNJUVQYFWQvQSA/qtB5g3Eo8EUnyI2zcfy2f9UmOoOsSJoKUrPFVRrYDZydmFfTSpueGYV7RykfT8D/MLwzxmOYaSLpburfPXh2UQ3wAsn7wwbprJtSAdgnP6Y9N3qH7LRTp7/iKz52nWRDwd684KB34b6ALqvM5t0smnP0up0JwPKgRnCyYYVboGGNp2iAzxySPOd2GJ7rgw1dCpTPDu/pgiXsg7w4gL0X0MsxP0eme62O/MBHKsLErtebJ/g44O4gBIgeyNiwcloLwAn9ADikD4s+to3n2xBfyKyrNW6b17dsBYl+Ztt/+tlMH/v1g47tGducqEq20njjCTxicL1FJNjDc3ddYb1T5YNMTvju6Lt40AkrU5rQdn3jfdcStuGObkLx6vAPcYpi/14duFwXrAizF2nVgzJ7cqL/7jOCf10wab/80nMk2wpz33J6YkuF21SRyVGJB3+4RwAcjGoY7TR5cDylPxr2Sp9QpnaD6AN9K4qpaR27LqJQ3pPSan9ldX6UIUFHsl+hz6KAEmOKNeIxsIz2Fws7xhsrleA3uo5qWKgSfBhDCKDzKy8Ly20rhd2wEL8kQdNzWxo1A9M2ajpP05lptSw1Ka7DddxgieAToj2kkQoiPqOhGjsGGLV7qhAsrFo8=
